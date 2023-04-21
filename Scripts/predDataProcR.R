@@ -5,12 +5,12 @@ library(utils)
 
 
 #Set working directory---------
-setwd("~/Desktop/R.Projects/PredictDataProcessing/Data")
+setwd("~/PredictDataProcessing/Data")
 
 
 #Step 1: Import dataset--------
 #Textfiles read using Jesse's pipeline
-predlum <- readRDS("~/Desktop/R.Projects/PredictDataProcessing/Data/6_dta_symbol_remove.rds")
+predlum <- readRDS("~/PredictDataProcessing/Data/6_dta_symbol_remove.rds")
 dim(predlum)
 
 
