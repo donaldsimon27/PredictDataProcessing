@@ -5,12 +5,12 @@ library(utils)
 
 
 #Set working directory---------
-setwd("~/PredictDataProcessing/Data")
+setwd("~/Data")
 
 
 #Step 1: Import dataset--------
 #Textfiles read using Jesse's pipeline
-predlum <- readRDS("~/PredictDataProcessing/Data/6_dta_symbol_remove.rds")
+predlum <- readRDS("~/Data/6_dta_symbol_remove.rds")
 dim(predlum)
 
 
@@ -101,15 +101,15 @@ impute <- function(dataName = "dataset_project") {
     select(-Min,-Max)
   # Round Obs.Conc.Impute to two decimal places.
   imp$obs_conc_impute <- round(imp$obs_conc_impute, 2)
-  saveRDS(imp, "~/Desktop/R.Projects/PredictDataProcessing/Data/predlum.rds")
-  write.csv(imp, file = "~/Desktop/R.Projects/PredictDataProcessing/Data/predlum.csv")
+  saveRDS(imp, "~/Data/predlum.rds")
+  write.csv(imp, file = "~/Data/predlum.csv")
 }
 impute(dataName = predlum)
 
 
 #Step 3: Select Observations only----------
 #remove standards
-predlum <- read.csv("~/Desktop/R.Projects/PredictDataProcessing/Data/predlum.csv") %>% 
+predlum <- read.csv("~/Data/predlum.csv") %>% 
   filter(grepl(pattern = "X", type)) %>% 
   select(c("description", "analyte_simple", "obs_conc_impute")) |> 
   filter(description  != "ST01064373" & 
@@ -149,7 +149,7 @@ predlum <- predlum |>
 
 
 #Step 6: Outcome from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-Outcome_PID <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+Outcome_PID <- readxl::read_xlsx("~/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
   rename(
     PID = SUBJID,
     HCT = LBORRES_HCT, 
