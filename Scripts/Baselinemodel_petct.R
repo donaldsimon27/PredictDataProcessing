@@ -1,8 +1,7 @@
-#Load packages----------
+#Load packages-------------
 library(tidymodels)  
 tidymodels::tidymodels_prefer()
 options(tidymodels.dark = TRUE)
-library(missForest)
 # Helper packages
 library(rpart)                 #needed to use using rpart.plot
 library(rpart.plot)            # for visualizing a decision tree
@@ -29,6 +28,8 @@ library(rules)
 library(pROC)
 library(kableExtra)
 library(patchwork)
+library(missForest)
+library(rstatix)
 
 
 #Set working directory for session with Jess---------
@@ -168,11 +169,12 @@ predlum <- predlum |>
   mutate(description1 = description) |> 
   select(description , description1, everything()) |> 
   separate(description1, into = c("PID", "Timepoint")) |> 
-  arrange(PID)
+  arrange(PID) |> 
+  mutate_at('PID', as.numeric)
 
 
 #Step 6: Outcome from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-Outcome_PID <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+labs_petct <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
   rename(
     PID = SUBJID,
     HCT = LBORRES_HCT, 
@@ -185,43 +187,46 @@ Outcome_PID <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Dat
     ALT = LBORRES_ALT, 
     bodymass = Weight, 
     Outcome = Cure_ConfRelapTF) |> 
-  select(PID, Outcome) |> 
   mutate(Outcome = ifelse(Outcome == "ConfRelapTF", "PoorOutcome", Outcome)) |>
   mutate_at("PID", as.character) |> 
-  filter(PID != 13085)
-
+  filter(PID != 13085) |> 
+  select(1, 59, 3, 5, 6, 8, 11, 12, 14:23, 28, 29) |> 
+  mutate(TBprev = ifelse(TBprev == 'otherwise', 'No', 'Yes')) |> 
+  select(PID, Outcome, TBprev, CurrentSmoker, everything()) |> 
+  mutate_at('PID', as.numeric)
 
 
 #Step 6: Link observations to clinical outcome -----------
-predlum <- predlum |> 
-  left_join(Outcome_PID, by = "PID") 
+predlum <- predlum |>
+  filter(Timepoint == "Dx") |> 
+  left_join(labs_petct, by = "PID") 
 
 predlum <- predlum |> 
-  select(1:3, 54, everything())
+  select(2, 54:56, everything()) |> 
+  select(-c(description, Timepoint))
 
 
 #Step 7: Baseline dataset MissForest Imputation for NA's--------
 #The imputation is done on the dataset in the wide format
-
-set.seed(15440)
-baseline_analytes <- predlum |> 
-  filter(Timepoint == "Dx") |> 
-  type.convert(as.is = FALSE) #CONVERT CHARACTER VECTORS TO FACTORS, MISSForest rejects character vectors
-
-baseline_pid <- baseline_analytes |>
-  select(PID, Outcome)
-
-baseline_analytes <- baseline_analytes |> 
-  select(-c(1:4)) |> 
+imputvars <- predlum |> 
+  select(-(1:4)) |> 
+  type.convert(as.is = FALSE) |>  #CONVERT CHARACTER VECTORS TO FACTORS, MISSForest rejects character vectors
   data.matrix() #mandatory transformation to a matrix for misForest
 
-baseline_misF <- missForest(baseline_analytes, verbose = TRUE)
+  
+baseline_pid_nom <- predlum |>         #Store Outcome, PID, and nominal vars
+  select(c(1:4)) 
+  
+
+set.seed(15440)
+baseline_misF <- missForest(imputvars, verbose = TRUE)
 
 
-data <- cbind(baseline_pid, baseline_misF$ximp)
+data <- cbind(baseline_pid_nom, baseline_misF$ximp)
+str(data)
 
 
-#BASELINE MODEL------
+#BASELINE MODEL-----
 #STEP1: LOAD FINAL BASELINE DATASET -----------
 data 
 
@@ -235,29 +240,12 @@ if (supportsMulticore()) {
 
 #Step2: Add BMI and TTD----------
 #BMI and TTD from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-bmi_ttp <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
-  rename(
-    PID = SUBJID,
-    HCT = LBORRES_HCT, 
-    WBC = LBORRES_WBC, 
-    HBA1C = LBORRES_HBA1C, 
-    AST = LBORRES_AST, 
-    HGB = LBORRES_HGB, 
-    PLT = LBORRES_PLT, 
-    CREAT = LBORRES_CREAT, 
-    ALT = LBORRES_ALT, 
-    bodymass = Weight, 
-    Outcome = Cure_ConfRelapTF) |> 
-  select(PID, BMI, TTD, HCT, WBC, HBA1C, AST, ALT, HGB, CREAT) 
+data <- data |> select(-PID)
 
-data <- data |> 
-  left_join(bmi_ttp, by = "PID")
-data <- data |>         #drop PID
-  select(Outcome, BMI, TTD, everything()) |> 
-  select(-PID)
-
+vars_to_factor <- c('Outcome', 'TBprev', 'CurrentSmoker')
+data[vars_to_factor] <- lapply(data[vars_to_factor], function(x) as.factor(x))
+rm(vars_to_factor)
 data$Outcome <- data$Outcome |> relevel(ref='PoorOutcome')
-
 
 #Step 3: Corr, numeric transformation, recipe-----
 ##Step_corr-------
@@ -266,34 +254,31 @@ corr_filter <- rec |>
   step_corr(all_numeric_predictors(), threshold = 0.9, method = "spearman") |> 
   prep(training = data) |> 
   bake(new_data = data)
-data <- corr_filter |> 
-  mutate_at("TTD", as.numeric)
+data <- corr_filter
 
 
 #Rank with Wilcoxin ---------
 df1 <- data %>% group_by(Outcome) %>%
-  summarise(across(BMI:CREAT, ~ mean(.x, na.rm = TRUE))) 
+  summarise(across(apoa1:TLG_wk0, ~ mean(.x, na.rm = TRUE))) 
 df2 <- data.frame(t(df1[-1]))
 colnames(df2) <- c("Cured", "PoorOutcome")
 
-library(rstatix)
-data <- data |> 
+data1 <- data |> 
+  select(-c('TBprev', 'CurrentSmoker')) |> 
   select(Outcome, everything())
-wilcxDx <- lapply(data[c(-1)], function(x) wilcox.test(x ~ Outcome, data, exact = FALSE))
+wilcxDx <- lapply(data1[c(-1)], function(x) wilcox.test(x ~ Outcome, data1, exact = FALSE))
 wilcxDx <- map_df(wilcxDx, tidy) 
 pvalDx <- df2 |> cbind(wilcxDx) |> 
   select(1, 2, 4) |> 
   arrange(p.value) 
 
-modelvars <- c("BMI", "tnfa", "il9", "mip1a", "il15", "svegfr3", "tnfri", "CREAT", "il1b", "apoc3", 
-                      "ifng", "il4ra", "il6", "tnfb", "HCT", "ip10", "mmp2", "il6ra", "svegfr1", "apoa1", 
-                       "il12", "itac", "c3", "svegfr2", "c4", "crp")
-
-#variables with p < 0.2--------------
-data <- data |> select(c(Outcome, BMI, tnfa, il9, mip1a, il15, svegfr3, tnfri, CREAT, il1b, apoc3, 
-                         ifng, il4ra, il6, tnfb, HCT, ip10, mmp2, il6ra, svegfr1, apoa1, 
-                         il12, itac, c3, svegfr2, c4, crp))
-
+#variables with p < 0.4--------------
+#TTD's pval = 0.851, included initially because it features strongly in other models
+#Nominal predictors: TBprev and CurrentSmoker included initially = models performed poorly
+data <- data |> select(c(Outcome, TBprev, BMI, CurrentSmoker, tnfa, il9, mip1a, il5, svegfr3, tnfri, CREAT, il1b, apoc3, 
+                         ifng, XpertCT_wk0,il4ra, il6, tnfb, CAVTOT_wk0, HCT, ip10, mmp2, il6ra, svegfr1, apoa1, 
+                         il12, itac, HDV_wk0,c3, svegfr2, c3, HaveCav_wk0, c4, crp, TLG_wk0, sil6r, factorb, saa, WBC, sap, TTD)
+)
 
 ##Initial recipe----
 normalized_recipe <-  recipe(Outcome ~ ., data = data) |>    
@@ -400,12 +385,11 @@ tune_results <- readRDS("~/Desktop/R.Projects/PredictLuminex/Data/Exported Data/
 normalised_training_recipe <- 
   recipe(Outcome ~ ., 
          data = data) |>
-  step_zv(all_predictors()) |>
+  step_zv(all_numeric_predictors()) |> 
+  step_dummy(all_nominal_predictors())|> 
   step_normalize(all_numeric_predictors()) |>
   step_smote(Outcome) 
 
-
-#step_corr(all_predictors(), threshold = 0.9, method = "spearman")  #Can add as an additional step to recipe
 
 #Step10: Fit models function-------
 fit_models <- function(model, grid, data, type){
@@ -507,6 +491,7 @@ roc_curves <- foreach(x=1:length(workflows$wflow_id)) %do% {
   }
   pROC::roc(Outcome ~ .pred_PoorOutcome, data=model_pred, auc=T,levels=c('Cured','PoorOutcome'), ci=TRUE, of = "se", ci.type = "bars", ci.method = "bootstrap", boot.n = 5000, parallel = TRUE, plot=FALSE)
 }
+
 par(mfrow=c(2,2))
 for (i in 1:4) {
   plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
@@ -517,25 +502,15 @@ for (i in 1:4) {
   plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
 }
 
+
 #?NB variables in the final model-----------
 en_fit <- tune_results[[4]]$result[[4]] |> 
   extract_workflow(tune_results[[4]]$wflow_id[[4]]) |> 
   finalize_workflow(show_best(tune_results[[4]]$result[[4]],n=1)) |> 
   fit(data=analysis(folds$splits[[1]]))  #?[[i]]
-
 en_fit |> tidy() |> arrange(estimate) |> print(n = 30)
 
 en_fit |> extract_fit_parsnip() |> 
-  vip(n = 30)
-C.50_fit
-
-rf_fit <- tune_results[[3]]$result[[3]] |> 
-  extract_workflow(tune_results[[3]]$wflow_id[[3]]) |> 
-  finalize_workflow(show_best(tune_results[[3]]$result[[3]],n=1)) |> 
-  fit(data=analysis(folds$splits[[1]])) 
-
-
-
-
-
+  vip(n = 15)
+en_fit 
 

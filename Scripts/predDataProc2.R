@@ -32,11 +32,11 @@ library(patchwork)
 
 
 #Set working directory for session with Jess---------
-setwd("~/Desktop/R.Projects/PredictLuminex/Scripts")
+setwd("/Data")
 
 #Step 1: Import dataset--------
 #Textfiles read using Jesse's pipeline
-predlum <- readRDS("~/Documents/projectDS/rds/6_dta_symbol_remove.rds")
+predlum <- readRDS("/Data/6_dta_symbol_remove.rds")
 
 #Step 2.1Initial imputation-------------------------
 #Ncite's Imputation script to impute OOR low and high values
@@ -172,7 +172,7 @@ predlum <- predlum |>
 
 
 #Step 6: Outcome from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-Outcome_PID <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+Outcome_PID <- readxl::read_xlsx("/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
   rename(
     PID = SUBJID,
     HCT = LBORRES_HCT, 
@@ -235,7 +235,7 @@ if (supportsMulticore()) {
 
 #Step2: Add BMI and TTD----------
 #BMI and TTD from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-bmi_ttp <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+bmi_ttp <- readxl::read_xlsx("/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
   rename(
     PID = SUBJID,
     HCT = LBORRES_HCT, 
@@ -285,15 +285,10 @@ pvalDx <- df2 |> cbind(wilcxDx) |>
   select(1, 2, 4) |> 
   arrange(p.value) 
 
-modelvars <- c("BMI", "tnfa", "il9", "mip1a", "il15", "svegfr3", "tnfri", "CREAT", "il1b", "apoc3", 
-                      "ifng", "il4ra", "il6", "tnfb", "HCT", "ip10", "mmp2", "il6ra", "svegfr1", "apoa1", 
-                       "il12", "itac", "c3", "svegfr2", "c4", "crp")
 
-#variables with p < 0.2--------------
-data <- data |> select(c(Outcome, BMI, tnfa, il9, mip1a, il15, svegfr3, tnfri, CREAT, il1b, apoc3, 
-                         ifng, il4ra, il6, tnfb, HCT, ip10, mmp2, il6ra, svegfr1, apoa1, 
-                         il12, itac, c3, svegfr2, c4, crp))
-
+#variables with p < 0.1--------------
+data <- data |> select(c(Outcome, BMI, tnfa, il9, mip1a, il15, svegfr3, tnfri, 
+                         CREAT, il1b, apoc3, ifng, il4ra, il6, tnfb, HCT, ip10, mmp2))
 
 ##Initial recipe----
 normalized_recipe <-  recipe(Outcome ~ ., data = data) |>    
@@ -388,11 +383,12 @@ tune_results <- foreach(i=1:length(folds$splits)) %do% {
 }
 
 
-saveRDS(tune_results, "~/Desktop/R.Projects/PredictLuminex/Data/Exported Data/tune_results.rds")
+saveRDS(tune_results, "/Data/tune_results.rds")
 
 
 #Step8: Tune results object----------
-tune_results <- readRDS("~/Desktop/R.Projects/PredictLuminex/Data/Exported Data/tune_results.rds")
+tune_results <- readRDS("/Data/tune_results.rds")
+
 
 
 
@@ -507,35 +503,17 @@ roc_curves <- foreach(x=1:length(workflows$wflow_id)) %do% {
   }
   pROC::roc(Outcome ~ .pred_PoorOutcome, data=model_pred, auc=T,levels=c('Cured','PoorOutcome'), ci=TRUE, of = "se", ci.type = "bars", ci.method = "bootstrap", boot.n = 5000, parallel = TRUE, plot=FALSE)
 }
+
 par(mfrow=c(2,2))
 for (i in 1:4) {
-  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
+  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+       grid.col=c("green", "red"), max.auc.polygon=TRUE,
+       auc.polygon.col="lightblue", print.thres=TRUE)
 }
 
 par(mfrow=c(1,1))       #if you want individual plots
 for (i in 1:4) {
-  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
+  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+       grid.col=c("green", "red"), max.auc.polygon=TRUE,
+       auc.polygon.col="lightblue", print.thres=TRUE)
 }
-
-#?NB variables in the final model-----------
-en_fit <- tune_results[[4]]$result[[4]] |> 
-  extract_workflow(tune_results[[4]]$wflow_id[[4]]) |> 
-  finalize_workflow(show_best(tune_results[[4]]$result[[4]],n=1)) |> 
-  fit(data=analysis(folds$splits[[1]]))  #?[[i]]
-
-en_fit |> tidy() |> arrange(estimate) |> print(n = 30)
-
-en_fit |> extract_fit_parsnip() |> 
-  vip(n = 30)
-C.50_fit
-
-rf_fit <- tune_results[[3]]$result[[3]] |> 
-  extract_workflow(tune_results[[3]]$wflow_id[[3]]) |> 
-  finalize_workflow(show_best(tune_results[[3]]$result[[3]],n=1)) |> 
-  fit(data=analysis(folds$splits[[1]])) 
-
-
-
-
-
-
