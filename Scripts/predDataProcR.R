@@ -31,12 +31,9 @@ library(kableExtra)
 library(patchwork)
 
 
-#Set working directory---------
-setwd("/Data")
-
 #Step 1: Import dataset--------
 #Textfiles read using Jesse's pipeline
-predlum <- readRDS("/Data/6_dta_symbol_remove.rds")
+predlum <- readRDS("Data/6_dta_symbol_remove.rds")
 
 #Step 2.1Initial imputation-------------------------
 #Ncite's Imputation script to impute OOR low and high values
@@ -172,7 +169,7 @@ predlum <- predlum |>
 
 
 #Step 6: Outcome from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-Outcome_PID <- readxl::read_xlsx("/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+Outcome_PID <- readxl::read_xlsx("Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
   rename(
     PID = SUBJID,
     HCT = LBORRES_HCT, 
@@ -235,7 +232,7 @@ if (supportsMulticore()) {
 
 #Step2: Add BMI and TTD----------
 #BMI and TTD from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-bmi_ttp <- readxl::read_xlsx("/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+bmi_ttp <- readxl::read_xlsx("Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
   rename(
     PID = SUBJID,
     HCT = LBORRES_HCT, 
