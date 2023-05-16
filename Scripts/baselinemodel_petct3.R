@@ -327,10 +327,9 @@ normalized_workflow <- normalized_workflow |>
 
 
 #Step6: Nested Crossvalidation---------------
-#Split in training and and test set ??? D/W 
 set.seed(14193)
 folds <- nested_cv(data,
-                   outside = vfold_cv(v = 10, repeats = 1, strata = "Outcome"),   #Fitting on this
+                   outside = vfold_cv(v = 10, repeats = 1, strata = "Outcome"),   
                    inside = bootstraps(times = 20, strata = "Outcome"))
 
 
