@@ -1,0 +1,569 @@
+Load packages----------
+  library(tidymodels)  
+tidymodels::tidymodels_prefer()
+options(tidymodels.dark = TRUE)
+library(missForest)
+# Helper packages
+library(rpart)                 #needed to use using rpart.plot
+library(rpart.plot)            # for visualizing a decision tree
+library(vip)                   # for variable importance plots
+library(bestNormalize)         #To use step_orderNorm
+library(future)
+library(foreach)
+library(doFuture)            
+library(rngtools)             #requires rng tools to call up doRNG
+library(doRNG)
+registerDoFuture()
+library(furrr)
+library(parallel)
+library(iterators)
+library(doParallel)
+library(kernlab)
+library(themis)
+library(ranger)
+library(kknn)
+library(Matrix)
+library(glmnet)
+library(C50)
+library(rules)
+library(pROC)
+library(kableExtra)
+library(patchwork)
+
+
+#Step 1: Import dataset--------
+#Textfiles read using Jesse's pipeline
+predlum <- readRDS("Data/6_dta_symbol_remove.rds")
+
+#Step 2.1Initial imputation-------------------------
+#Ncite's Imputation script to impute OOR low and high values
+
+#Use the "remove_symbols" function to classify missing data, add metadata variables to the data set and remove symbols.
+
+remove_symbols <- function(dataName = "dataset_project"){
+  #' @importFrom dplyr mutate
+  #' @importFrom magrittr %>%
+  dataName <- dataName %>%
+    mutate(
+      meta_truemissing=ifelse(
+        obs_conc == ""
+        , TRUE
+        , FALSE
+      )
+      , meta_threestar=ifelse(
+        grepl("***", obs_conc,fixed=TRUE)
+        , TRUE
+        , FALSE
+      )
+      , meta_onestar=ifelse(
+        grepl("^\\*\\d+", obs_conc, perl=TRUE)
+        , TRUE
+        , FALSE
+      )
+      , meta_oorgt=ifelse(
+        grepl("OOR >", obs_conc, perl=TRUE)
+        , TRUE
+        , FALSE
+      )
+      , meta_oorlt=ifelse(
+        grepl("OOR <", obs_conc, perl=TRUE)
+        , TRUE
+        , FALSE
+      )
+      , obs_conc_numerics=as.numeric(
+        gsub(
+          "\\D*(\\d+(?:\\.\\d+)*(?:E[+-]\\d+)*)"
+          ,"\\1"
+          ,obs_conc,perl=T
+        )
+      )
+    )
+  
+}
+#Save in RDS object.
+#saveRDS(dataName, "Data/rdsfold/predlum.rds")
+predlum <- remove_symbols(dataName = predlum)
+
+
+#Step 2.2: Imputation-----------
+#Impute the OOR values, oor below (<) and oor above (>) values.
+#Assuming the following variables and variable names are in your data set, e.g.,
+#"analyte" containing the analyte names.
+#"obs_conc_numerics" created in the previous step.
+
+impute <- function(dataName = "dataset_project") {
+  #' @importFrom dplyr arrange count group_by summarise
+  #' @importFrom magrittr %>%
+  #' @importFrom tidyr pivot_wider
+  #' @importFrom utils write.csv
+  df_rawminmaxv <- dataName %>%
+    group_by(analyte) %>%
+    summarise(
+      Min = min(obs_conc_numerics, na.rm = TRUE),
+      Max = max(obs_conc_numerics, na.rm = TRUE)
+    )
+  # Join experiment data and the table with the min and max analyte
+  # concentrations.
+  df_rawminmaxv <- left_join(dataName, df_rawminmaxv)
+  # Impute OOR below (<) and OOR above (>) values.
+  imp <- df_rawminmaxv %>%
+    mutate(
+      obs_conc_impute =
+        ifelse(
+          meta_oorlt == TRUE,
+          Min - (Min * 0.0001),      #Min - (Min * 0.0001)
+          ifelse(
+            meta_oorgt == TRUE,
+            Max + ((Max - Min) * 0.0001),        
+            obs_conc_numerics
+          )
+        )
+    ) %>%
+    select(-Min,-Max)
+  # Round Obs.Conc.Impute to two decimal places.
+  imp$obs_conc_impute <- round(imp$obs_conc_impute, 2)
+  return(imp)
+}
+predlum <- impute(dataName = predlum)
+
+
+#Step 3: Select Observations only----------
+#remove standards
+predlum <- predlum %>% 
+  filter(grepl(pattern = "X", type)) %>% 
+  select(c("description", "analyte_simple", "obs_conc_impute")) |> 
+  filter(description  != "ST01064373" & 
+           description != "ST01061789" & 
+           description  != "ST01061782"  & 
+           description  != "ST01059102" & 
+           description  != "ST01046593") 
+
+
+#STEP 4: Create a vector with the PDs and TPs to be removed-------------
+double_entry <- c("13031-W04", "13031-W08", "13031-W16", "13031-W24")
+mislabeled <- c("130016-W24_7084169", "13009-W24", "13010-W08", "13010-W24", "13085-Dx", "13085-W04", 
+                "13085-W08" , "13085-W16", "13085-W24", "13107-W16", "13108-W08")
+
+
+#Step 5: Remove disputed observations--------------
+predlum <- 
+  predlum %>% 
+  filter(!(description %in% double_entry )) |>      #remove concatenated double data points
+  filter(!(description %in% mislabeled)) |>         #remove "mislabeled samples from the dataset
+  mutate(description = ifelse(description == "15026 REC", "15026-W24", description)) |>  #Correct "15026 REC" to "15026-W24" as per luminex technician
+  mutate(description = gsub('_.*', '', description)) |> 
+  as.data.frame() %>% 
+  replace(.=="NULL", NA)  |>   #Replace NULL characters in the dataset by coding them as NA; not enough sample volume for experiment
+  rename("analyte" = "analyte_simple")
+
+
+predlum <- predlum |>                                       
+  unique() |> 
+  pivot_wider(names_from = "analyte", values_from = "obs_conc_impute") 
+
+predlum <- predlum |> 
+  mutate(description1 = description) |> 
+  select(description , description1, everything()) |> 
+  separate(description1, into = c("PID", "Timepoint")) |> 
+  arrange(PID)
+
+
+#Step 6: Outcome from PETCT spreadsheet provided by Shawn (PredictTB)-----------
+Outcome_PID <- readxl::read_xlsx("Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+  rename(
+    PID = SUBJID,
+    HCT = LBORRES_HCT, 
+    WBC = LBORRES_WBC, 
+    HBA1C = LBORRES_HBA1C, 
+    AST = LBORRES_AST, 
+    HGB = LBORRES_HGB, 
+    PLT = LBORRES_PLT, 
+    CREAT = LBORRES_CREAT, 
+    ALT = LBORRES_ALT, 
+    bodymass = Weight, 
+    Outcome = Cure_ConfRelapTF) |> 
+  select(PID, Outcome) |> 
+  mutate(Outcome = ifelse(Outcome == "ConfRelapTF", "PoorOutcome", Outcome)) |>
+  mutate_at("PID", as.character) |> 
+  filter(PID != 13085)
+
+
+
+#Step 6: Link observations to clinical outcome -----------
+predlum <- predlum |> 
+  left_join(Outcome_PID, by = "PID") 
+
+predlum <- predlum |> 
+  select(1:3, 54, everything())
+
+
+#Step 7: Baseline dataset MissForest Imputation for NA's--------
+#The imputation is done on the dataset in the wide format
+
+set.seed(15440)
+baseline_analytes <- predlum |> 
+  filter(Timepoint == "Dx") |> 
+  type.convert(as.is = FALSE) #CONVERT CHARACTER VECTORS TO FACTORS, MISSForest rejects character vectors
+
+baseline_pid <- baseline_analytes |>
+  select(PID, Outcome)
+
+baseline_analytes <- baseline_analytes |> 
+  select(-c(1:4)) |> 
+  data.matrix() #mandatory transformation to a matrix for misForest
+
+baseline_misF <- missForest(baseline_analytes, verbose = TRUE)
+
+
+data <- cbind(baseline_pid, baseline_misF$ximp)
+
+
+#BASELINE MODEL------
+#STEP1: LOAD FINAL BASELINE DATASET -----------
+data 
+
+#Step2: Add BMI and TTD----------
+#BMI and TTD from PETCT spreadsheet provided by Shawn (PredictTB)-----------
+bmi_ttp <- readxl::read_xlsx("Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+  rename(
+    PID = SUBJID,
+    HCT = LBORRES_HCT, 
+    WBC = LBORRES_WBC, 
+    HBA1C = LBORRES_HBA1C, 
+    AST = LBORRES_AST, 
+    HGB = LBORRES_HGB, 
+    PLT = LBORRES_PLT, 
+    CREAT = LBORRES_CREAT, 
+    ALT = LBORRES_ALT, 
+    bodymass = Weight, 
+    Outcome = Cure_ConfRelapTF) |> 
+  select(PID, BMI, TTD, HCT, WBC, HBA1C, AST, ALT, HGB, CREAT) 
+
+data <- data |> 
+  left_join(bmi_ttp, by = "PID")
+data <- data |>         #drop PID
+  select(Outcome, BMI, TTD, everything()) |> 
+  select(-PID)
+
+data$Outcome <- data$Outcome |> relevel(ref='PoorOutcome')
+
+
+#Step 3: Corr, numeric transformation, recipe-----
+##Step_corr-------
+rec <- recipe(Outcome ~ ., data = data)
+corr_filter <- rec |> 
+  step_corr(all_numeric_predictors(), threshold = 0.9, method = "spearman") |> 
+  prep(training = data) |> 
+  bake(new_data = data)
+data <- corr_filter |> 
+  mutate_at("TTD", as.numeric)
+
+
+#Rank with Wilcoxin ---------
+df1 <- data %>% group_by(Outcome) %>%
+  summarise(across(BMI:CREAT, ~ mean(.x, na.rm = TRUE))) 
+df2 <- data.frame(t(df1[-1]))
+colnames(df2) <- c("Cured", "PoorOutcome")
+
+library(rstatix)
+data <- data |> 
+  select(Outcome, everything())
+wilcxDx <- lapply(data[c(-1)], function(x) wilcox.test(x ~ Outcome, data, exact = FALSE))
+wilcxDx <- map_df(wilcxDx, tidy) 
+pvalDx <- df2 |> cbind(wilcxDx) |> 
+  select(1, 2, 4) |> 
+  arrange(p.value) 
+
+
+#variables with p < 0.1--------------
+data <- data |> select(c(Outcome, BMI, tnfa, il9, mip1a, il15, svegfr3, tnfri, 
+                         CREAT, il1b, apoc3, ifng, il4ra, il6, tnfb, HCT, ip10, mmp2))
+
+
+
+#Implement step_orderNorm-----------
+tranform_rec <- recipe(Outcome ~ ., data = data)  
+transform <- step_orderNorm(tranform_rec, all_numeric_predictors())
+prep_est <- prep(transform, training = data)
+bake <- est <- bake(prep_est, data)
+#plot(density(data$tnfa), main = "before")    #assesses if transformation was successful
+#plot(density(bake$tnfa), main = "after")
+data <- bake
+
+
+##Initial recipe----
+normalized_recipe <-  recipe(Outcome ~ ., data = data) |>    
+  step_zv(all_numeric_predictors()) |> 
+  step_dummy(all_nominal_predictors())|>  
+  themis::step_downsample(Outcome)
+
+
+predictor_count <- sum(normalized_recipe$term_info$role == 'predictor')       
+predictor_count
+
+#Step4: Different Models--------------
+C5.0_mod <-
+  C5_rules(trees = tune(), min_n = tune()) |> 
+  set_engine('C5.0') |> 
+  set_mode("classification")
+KNN_mod <-
+  nearest_neighbor(neighbors = tune(), weight_func = tune(), dist_power = tune()) |> 
+  set_engine('kknn') |> 
+  set_mode('classification')
+Random_Forest_mod <-
+  rand_forest(mtry = tune(), trees = tune(), min_n = tune()) |> 
+  set_engine('ranger') |> 
+  set_mode('classification')
+Elastic_net_mod <-
+  logistic_reg(penalty = tune(), mixture = tune()) |> 
+  set_engine('glmnet') |> 
+  set_mode("classification")
+
+
+#Step5: CREATING THE WORKFLOW SET-----------
+normalized_workflow <-
+  workflowsets::workflow_set(
+    preproc = list(normalised = normalized_recipe),
+    models = list(C5.0 = C5.0_mod,
+                  KNN = KNN_mod,
+                  RF = Random_Forest_mod,
+                  EN = Elastic_net_mod))
+
+normalized_workflow <- normalized_workflow |> 
+  mutate(wflow_id = gsub("(normalised_)|(numeric_)", "", wflow_id))           #to remove the normalised prefix
+
+
+#Step6: Nested Crossvalidation---------------
+set.seed(14193)
+folds <- nested_cv(data,
+                   outside = vfold_cv(v = 3, repeats = 3, strata = "Outcome"),  
+                   inside = bootstraps(times = 20, strata = "Outcome"))
+
+
+
+#Step5: Model parameters and workflows------------
+C5.0_params <- parameters(trees(range = c(1,100)), min_n())
+RF_params <- parameters(mtry(range=c(1, predictor_count)), trees(range = c(1,100)), min_n()) 
+KNN_params <- parameters(neighbors(), weight_func(), dist_power()) |> 
+  recipes::update(weight_func = weight_func(c("triangular", "biweight", "triweight", "cos", "gaussian", "rank", "optimal")))
+EN_params <- parameters(penalty(), mixture())
+
+
+
+#Step6: Workflows---------
+workflows <- normalized_workflow |>
+  option_add(param_info = C5.0_params, id = "C5.0") |> 
+  option_add(param_info = KNN_params, id = "KNN") |> 
+  option_add(param_info = RF_params, id = "RF") |> 
+  option_add(param_info = EN_params, id = "EN")
+
+
+#Step7: Tuning-------------
+bayes_ctrl <- control_bayes(no_improve = 15L, 
+                            save_pred = TRUE, 
+                            parallel_over = "everything",    
+                            save_workflow = TRUE, 
+                            allow_par = TRUE, 
+                            verbose = TRUE)
+
+
+#tune_results <- foreach(i=1:length(folds$splits)) %dorng% {
+tune_results <- foreach(i=1:length(folds$splits)) %do% {
+  library(rules)
+  workflows %>% workflow_map(seed = 15440,
+                             fn = "tune_bayes",
+                             resamples = folds$inner_resamples[[i]],
+                             metrics = metric_set(roc_auc),
+                             objective = exp_improve(),
+                             iter = 50,
+                             control = bayes_ctrl)
+}
+
+
+saveRDS(tune_results, "Data/tune_results_predDataProc2.rds")
+
+
+#Step8: Tune results object----------
+tune_results <- readRDS("Data/tune_results_predDataProc2.rds")
+
+
+
+
+#Step9: Updated Normalized recipe----------
+normalised_training_recipe <- 
+  recipe(Outcome ~ ., 
+         data = data) |>
+  step_zv(all_predictors()) |>
+  step_smote(Outcome) 
+
+
+#step_corr(all_predictors(), threshold = 0.9, method = "spearman")  #Can add as an additional step to recipe
+
+#Step10: Fit models function-------
+fit_models <- function(model, grid, data, type){
+  
+  best_result <-  grid |> 
+    show_best(n=1)
+  
+  model_fit <-
+    grid |> extract_workflow(model) |>
+    finalize_workflow(best_result) |>
+    update_recipe(normalised_training_recipe) |> 
+    fit(data=analysis(data))
+  
+  pred <-
+    predict(model_fit, assessment(data)) |> 
+    bind_cols(predict(model_fit, assessment(data), type = "prob")) |> 
+    bind_cols(assessment(data) |> select(Outcome))
+  
+  roc_auc <- pred |> roc_auc(truth = Outcome, .pred_PoorOutcome )
+  sens <- pred|> sensitivity(Outcome, .pred_class)
+  spec <- pred |> specificity(Outcome, .pred_class)
+  
+  perf <- tibble(Model = model, data ="train") |> 
+    mutate(auc = roc_auc$.estimate, sens =  sens$.estimate, spec = spec$.estimate)
+  
+  
+  if (type==1){
+    return(perf)
+  }
+  else if(type==2){
+    pred <- pred |> mutate(Resamples = data$id)
+    return(pred)
+  }
+  else if(type==3){
+    return(best_result)
+  }
+}
+
+
+#Step9:Fit------------
+training_results <- foreach(x=1:length(folds$splits)) %do% {
+  model_results <- foreach(y=1:length(workflows$wflow_id)) %do% {
+    fit_models(tune_results[[x]]$wflow_id[[y]], tune_results[[x]]$result[[y]], folds$splits[[x]], 1)
+  }
+  bind_rows(model_results)
+}
+
+training_average <- foreach(x=1:length(workflows$wflow_id), .combine=rbind) %dorng% {
+  bind_rows(training_results) |> filter(Model==workflows$wflow_id[[x]]) |>
+    group_by(Model, data) |> summarise_if(is.numeric, list(mean = mean, sd = sd), na.rm=TRUE)
+}
+
+training_average[3:8] <- training_average[3:8] |> round(3)
+
+new_training_average <- foreach(x=1:length(workflows$wflow_id)) %do% {
+  tibble(Model = workflows$wflow_id[[x]], data = "train") |>
+    mutate(auc = paste0(training_average$auc_mean[[x]], "\u00B1", training_average$auc_sd[[x]]),
+           sens = paste0(training_average$sens_mean[[x]], "\u00B1", training_average$sens_sd[[x]]),
+           spec = paste0(training_average$spec_mean[[x]], "\u00B1", training_average$spec_sd[[x]]))
+} |> bind_rows()
+
+arrange(new_training_average, desc(auc))|> 
+  kable(align=rep('c')) |> 
+  kable_classic(full_width = F)
+
+#Step10: Predictions----------
+prediction_results <- foreach(x=1:length(folds$splits)) %do% {
+  model_perf <- foreach(y=1:length(workflows$wflow_id)) %do% {
+    fit_models(tune_results[[x]]$wflow_id[[y]], tune_results[[x]]$result[[y]], folds$splits[[x]], 2)
+  }
+}
+
+roc_curves_folds <- foreach(x=1:length(workflows$wflow_id)) %do% {
+  model_pred <- foreach(y=1:length(folds$splits)) %do% {
+    prediction_results[[y]][[x]] |> 
+      unnest(cols = c(Resamples))|> 
+      rename(Resamples=id)
+  }
+  bind_rows(model_pred) |> 
+    group_by(Resamples) |> 
+    roc_curve(Outcome, .pred_PoorOutcome) |> 
+    autoplot() + 
+    labs(title = workflows$wflow_id[[x]]) + 
+    theme_update(plot.title = element_text(hjust = 0.5)) +
+    theme_bw() +
+    theme(legend.position="left")        #alternative legend = "none
+}
+
+
+roc_curves_folds[[1]] + roc_curves_folds[[2]] + roc_curves_folds[[3]] + roc_curves_folds[[4]] + 
+  plot_layout(nrow = 2, byrow = FALSE)
+
+
+roc_curves <- foreach(x=1:length(workflows$wflow_id)) %do% {
+  model_pred <- foreach(y=1:length(folds$splits), .combine = rbind) %do% {
+    prediction_results[[y]][[x]] |> 
+      unnest(cols = c(Resamples))|> 
+      rename(Resamples=id)
+  }
+  pROC::roc(Outcome ~ .pred_PoorOutcome, data=model_pred, auc=T,levels=c('Cured','PoorOutcome'), ci=TRUE, of = "se", ci.type = "bars", ci.method = "bootstrap", boot.n = 5000, parallel = TRUE, plot=FALSE)
+}
+
+par(mfrow=c(2,2)) 
+for (i in 1:4) {
+  plot(roc_curves[[i]], 
+       main=workflows$wflow_id[i], 
+       print.auc=T, 
+       print.thres=TRUE, 
+       legacy.axes = TRUE)
+}
+
+
+par(mfrow=c(1,1))       #if you want individual plots
+for (i in 1:4) {
+  plot(roc_curves[[i]], 
+       main=workflows$wflow_id[i], 
+       print.auc=T, 
+       print.thres=TRUE, 
+       legacy.axes = TRUE)
+}
+
+
+se.ci <- ci(roc_curves[[1]], of='se')
+roc_curves[[2]]$sensitivities[which(roc_curves[[2]]$specificities >= 0.8)[1]]
+roc_curves[[2]]$specificities[which(roc_curves[[2]]$specificities >= 0.8)[1]]
+
+#specificity when sensitivity fixed-----
+alt_cutoffs <- foreach(alg=1:length(workflows$wflow_id), .combine=rbind) %do% {
+  perf <- foreach(senslimit=c(0.9,0.95)) %do% {
+    spec <- roc_curves[[alg]]$specificities[tail(which(roc_curves[[alg]]$sensitivities >= senslimit),n=1)]
+    # sens <- roc_curves[[alg]]$sensitivities[tail(which(roc_curves[[alg]]$sensitivities >= senslimit),n=1)]
+    round(spec,3)
+  }
+  c(Model=workflows$wflow_id[alg],perf)
+}
+
+alt_cutoffs |> 
+  kable(align=rep('c'), row.names = F, col.names = c('Model','Sens = 0.90','Sens = 0.95'), digits = 3) |> 
+  kable_classic(full_width = F)
+
+
+#Variable importance-----------
+c5.0_fit <- tune_results[[1]]$result[[1]] |> 
+  extract_workflow(tune_results[[1]]$wflow_id[[1]]) |> 
+  finalize_workflow(show_best(tune_results[[1]]$result[[1]],n=1)) |> 
+  fit(data=analysis(folds$splits[[1]]))
+c5.0_fit |> extract_fit_parsnip() |> 
+  vip(geom = "point", num_features = 20)
+
+
+en_fit <- tune_results[[4]]$result[[4]] |> 
+  extract_workflow(tune_results[[4]]$wflow_id[[4]]) |> 
+  finalize_workflow(show_best(tune_results[[4]]$result[[4]],n=1)) |> 
+  fit(data=analysis(folds$splits[[1]]))
+en_fit |> tidy() |> arrange(estimate) |> print(n = 30)
+en_fit |> extract_fit_parsnip() |> 
+  vip(geom = "point", horiz = TRUE)
+en_fit %>% extract_fit_parsnip() %>% vip()
+
+rf_fit <- tune_results[[3]]$result[[3]] |> 
+  extract_workflow(tune_results[[3]]$wflow_id[[3]]) |> 
+  finalize_workflow(show_best(tune_results[[1]]$result[[1]],n=1)) |> 
+  fit(data=analysis(folds$splits[[1]]))
+
+
+knn_fit <- tune_results[[2]]$result[[2]] %>%  
+  extract_workflow(tune_results[[2]]$wflow_id[[2]]) |> 
+  finalize_workflow(show_best(tune_results[[2]]$result[[2]],n=1)) |> 
+  fit(data=analysis(folds$splits[[1]]))

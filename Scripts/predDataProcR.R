@@ -37,7 +37,6 @@ predlum <- readRDS("Data/6_dta_symbol_remove.rds")
 
 #Step 2.1Initial imputation-------------------------
 #Ncite's Imputation script to impute OOR low and high values
-
 #Use the "remove_symbols" function to classify missing data, add metadata variables to the data set and remove symbols.
 
 remove_symbols <- function(dataName = "dataset_project"){
@@ -223,13 +222,6 @@ data <- cbind(baseline_pid, baseline_misF$ximp)
 data 
 
 
-if (supportsMulticore()) {
-  plan(multicore, workers=availableCores(omit=1))
-} else {
-  plan(multisession, workers=availableCores(omit=1))
-}                              
-
-
 #Step2: Add BMI and TTD----------
 #BMI and TTD from PETCT spreadsheet provided by Shawn (PredictTB)-----------
 bmi_ttp <- readxl::read_xlsx("Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
@@ -260,7 +252,7 @@ data$Outcome <- data$Outcome |> relevel(ref='PoorOutcome')
 ##Step_corr-------
 rec <- recipe(Outcome ~ ., data = data)
 corr_filter <- rec |> 
-  step_corr(all_numeric_predictors(), threshold = 0.9, method = "spearman") |> 
+  step_corr(all_numeric_predictors(), threshold = 0.9, method = "spearman") |>  #2variables removed
   prep(training = data) |> 
   bake(new_data = data)
 data <- corr_filter |> 
@@ -283,7 +275,10 @@ pvalDx <- df2 |> cbind(wilcxDx) |>
   arrange(p.value) 
 
 
-#variables with p < 0.2--------------
+
+
+
+#variables with p < 0.1--------------
 data <- data |> select(c(Outcome, BMI, tnfa, il9, mip1a, il15, svegfr3, tnfri, CREAT, il1b, apoc3, 
                          ifng, il4ra, il6, tnfb, HCT, ip10, mmp2, il6ra, svegfr1, apoa1, 
                          il12, itac, c3, svegfr2, c4, crp))
@@ -337,7 +332,7 @@ normalized_workflow <- normalized_workflow |>
 
 set.seed(14193)
 folds <- nested_cv(data,
-                   outside = vfold_cv(v = 10, repeats = 1, strata = "Outcome"), 
+                   outside = vfold_cv(v = 3, repeats = 3, strata = "Outcome"), 
                    inside = bootstraps(times = 20, strata = "Outcome"))
 
 
@@ -380,11 +375,11 @@ tune_results <- foreach(i=1:length(folds$splits)) %do% {
 }
 
 
-saveRDS(tune_results, "Data/tune_results.rds")
+saveRDS(tune_results, "Data/tune_results_predDataProcR.rds")
 
 
 #Step8: Tune results object----------
-tune_results <- readRDS("Data/tune_results.rds")
+tune_results <- readRDS("Data/tune_results_predDataProcR.rds")
 
 
 
@@ -463,7 +458,7 @@ arrange(new_training_average, desc(auc))|>
   kable(align=rep('c')) |> 
   kable_classic(full_width = F)
 
-#Step10: Predictions----------
+#Step11: Predictions----------
 prediction_results <- foreach(x=1:length(folds$splits)) %do% {
   model_perf <- foreach(y=1:length(workflows$wflow_id)) %do% {
     fit_models(tune_results[[x]]$wflow_id[[y]], tune_results[[x]]$result[[y]], folds$splits[[x]], 2)
@@ -499,17 +494,20 @@ roc_curves <- foreach(x=1:length(workflows$wflow_id)) %do% {
   }
   pROC::roc(Outcome ~ .pred_PoorOutcome, data=model_pred, auc=T,levels=c('Cured','PoorOutcome'), ci=TRUE, of = "se", ci.type = "bars", ci.method = "bootstrap", boot.n = 5000, parallel = TRUE, plot=FALSE)
 }
+
 par(mfrow=c(2,2))
 for (i in 1:4) {
-  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
+  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T,
+       print.thres=TRUE)
 }
+
 
 par(mfrow=c(1,1))       #if you want individual plots
 for (i in 1:4) {
   plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
 }
 
-#??NB variables in the final model-----------
+#Step12: NB variables in the final model-----------
 en_fit <- tune_results[[4]]$result[[4]] |> 
   extract_workflow(tune_results[[4]]$wflow_id[[4]]) |> 
   finalize_workflow(show_best(tune_results[[4]]$result[[4]],n=1)) |> 
@@ -518,16 +516,10 @@ en_fit <- tune_results[[4]]$result[[4]] |>
 en_fit |> tidy() |> arrange(estimate) |> print(n = 30)
 
 en_fit |> extract_fit_parsnip() |> 
-  vip(n = 30)
-C.50_fit
+  vip(n = 10, geom = "point")
+en_fit
 
 rf_fit <- tune_results[[3]]$result[[3]] |> 
   extract_workflow(tune_results[[3]]$wflow_id[[3]]) |> 
   finalize_workflow(show_best(tune_results[[3]]$result[[3]],n=1)) |> 
   fit(data=analysis(folds$splits[[1]])) 
-
-
-
-
-
-

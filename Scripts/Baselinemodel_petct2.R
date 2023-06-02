@@ -32,12 +32,10 @@ library(missForest)
 library(rstatix)
 
 
-#Set working directory for session with Jess---------
-setwd("~/Desktop/R.Projects/PredictLuminex/Scripts")
 
 #Step 1: Import dataset--------
 #Textfiles read using Jesse's pipeline
-predlum <- readRDS("~/Documents/projectDS/rds/6_dta_symbol_remove.rds")
+predlum <- readRDS("Data/6_dta_symbol_remove.rds")
 
 #Step 2.1Initial imputation-------------------------
 #Ncite's Imputation script to impute OOR low and high values
@@ -85,7 +83,7 @@ remove_symbols <- function(dataName = "dataset_project"){
   
 }
 #Save in RDS object.
-#saveRDS(dataName, "~/Desktop/R.Projects/PredictLuminex/Data/rdsfold/predlum.rds")
+#saveRDS(dataName, "Data/rdsfold/predlum.rds")
 predlum <- remove_symbols(dataName = predlum)
 
 
@@ -174,7 +172,7 @@ predlum <- predlum |>
 
 
 #Step 6: Outcome from PETCT spreadsheet provided by Shawn (PredictTB)-----------
-labs_petct <- readxl::read_xlsx("~/Desktop/R.Projects/PredictDataProcessing/Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
+labs_petct <- readxl::read_xlsx("Data/Predict_luminex_Outcome_clinical_petct.xlsx") |> 
   rename(
     PID = SUBJID,
     HCT = LBORRES_HCT, 
@@ -273,7 +271,7 @@ pvalDx <- df2 |> cbind(wilcxDx) |>
   arrange(p.value) 
 
 #variables with p < 0.25--------------
-#TTD's pval = 0.851, included initially because it features strongly in other models
+#TTD's pval = 0.851, included initially because it features strongly in other models, not included
 #Nominal predictors: TBprev and CurrentSmoker included initially = models performed poorly
 #Remove TNFb, il5, abd il9 since they have too many OOR low values
 
@@ -330,7 +328,7 @@ normalized_workflow <- normalized_workflow |>
 #Split in training and and test set ??? D/W 
 set.seed(14193)
 folds <- nested_cv(data,
-                   outside = vfold_cv(v = 10, repeats = 1, strata = "Outcome"),   #Fitting on this
+                   outside = vfold_cv(v = 3, repeats = 3, strata = "Outcome"),   #Fitting on this
                    inside = bootstraps(times = 20, strata = "Outcome"))
 
 
@@ -353,7 +351,7 @@ workflows <- normalized_workflow |>
 #Step7: Tuning-------------
 bayes_ctrl <- control_bayes(no_improve = 15L, 
                             save_pred = TRUE, 
-                            parallel_over = "everything",    # replaced "everything" with "resamples" -  success when parallel =  "resamples" instead of parallel =  "everything" is used 
+                            parallel_over = "everything",   
                             save_workflow = TRUE, 
                             allow_par = TRUE, 
                             verbose = TRUE)
@@ -372,11 +370,11 @@ tune_results <- foreach(i=1:length(folds$splits)) %do% {
 }
 
 
-saveRDS(tune_results, "~/Desktop/R.Projects/PredictLuminex/Data/Exported Data/tune_results.rds")
+saveRDS(tune_results, "Data/Exported Data/tune_results_baselinemodel_petct2.rds")
 
 
 #Step8: Tune results object----------
-tune_results <- readRDS("~/Desktop/R.Projects/PredictLuminex/Data/Exported Data/tune_results.rds")
+tune_results <- readRDS("Data/Exported Data/tune_results_baselinemodel_petct2.rds")
 
 
 
@@ -493,14 +491,15 @@ roc_curves <- foreach(x=1:length(workflows$wflow_id)) %do% {
 
 par(mfrow=c(2,2))
 for (i in 1:4) {
-  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
+  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T,
+       print.thres=TRUE)
 }
 
 par(mfrow=c(1,1))       #if you want individual plots
 for (i in 1:4) {
-  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T)
+  plot(roc_curves[[i]], main=workflows$wflow_id[i], print.auc=T,
+       print.thres=TRUE)
 }
-
 
 #?NB variables in the final model-----------
 en_fit <- tune_results[[4]]$result[[4]] |> 
@@ -512,8 +511,6 @@ en_fit |> tidy() |> arrange(estimate) |> print(n = 30)
 en_fit |> extract_fit_parsnip() |> 
   vip(n = 15)
 en_fit 
-
-
 
 
 
